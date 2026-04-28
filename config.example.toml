@@ -1,0 +1,14 @@
+[global]
+structured_log_root = "/tmp/task_structured_logs"
+cache_dir = "/tmp/task_monitor_cache"
+monitor_log_dir = "/tmp/task_monitor_logs"
+
+[feishu]
+webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/replace-me"
+
+[jobs.daily_sync]
+script = "/opt/jobs/daily_sync.py"
+interpreter = "python3"
+timeout_seconds = 600
+notify_on_success = false
+

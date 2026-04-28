@@ -1,0 +1,882 @@
+# Linux Python 任务监视器工程开发文档
+
+## 1. 项目背景
+
+本项目用于构建一个运行在 Linux 环境下的 Python 任务监视器。
+
+业务脚本原本由 `crontab` 直接定时执行。新方案改为由 `crontab` 定时启动任务监视器，再由任务监视器启动具体业务脚本。任务监视器在业务脚本结束后读取业务脚本生成的结构化日志，判断任务执行结果，并通过飞书自定义机器人 Webhook 推送结果。
+
+任务监视器只负责监控单个任务的一次执行，不作为常驻服务，不承担任务调度系统职责。
+
+---
+
+## 2. 目标与非目标
+
+### 2.1 目标
+
+- 支持 Linux 环境运行。
+- 支持 Python 3.8 ~ Python 3.12。
+- 使用 `uv` 管理 Python 项目。
+- 通过 `crontab` 启动任务监视器。
+- 每次运行只监视一个任务。
+- 由任务监视器启动业务脚本。
+- 业务脚本自行生成结构化日志。
+- 任务监视器读取结构化日志判断任务成功或失败。
+- 结构化日志优先，业务脚本退出码兜底。
+- 失败必须推送飞书。
+- 成功是否推送由任务配置控制。
+- 超时后推送飞书，任务监视器退出，不终止业务进程。
+- 使用 TOML 配置文件统一管理多个任务。
+- 使用本地缓存记录同一天同一任务的执行次数。
+
+### 2.2 非目标
+
+第一版不做以下内容：
+
+- 不做常驻服务。
+- 不做任务调度系统。
+- 不做多任务并发调度。
+- 不做任务自动重试。
+- 不做 Web UI。
+- 不做数据库持久化。
+- 不捕获业务脚本 stdout/stderr。
+- 不解析业务脚本自身普通日志。
+- 不向业务脚本传递业务参数。
+- 不终止超时后的业务进程。
+- 不支持多个飞书机器人分流推送。
+- 不支持任务级 Webhook 覆盖。
+- 不支持复杂权限系统。
+
+---
+
+## 3. 功能设计
+
+### 3.1 命令行入口
+
+任务监视器通过命令行启动。
+
+示例：
+
+```bash
+task_monitor --config /etc/task_monitor/config.toml --job daily_sync
+````
+
+参数：
+
+| 参数         | 必填 | 说明          |
+| ---------- | -: | ----------- |
+| `--config` |  是 | TOML 配置文件路径 |
+| `--job`    |  是 | 本次需要监视的任务名  |
+
+单次运行只允许监视一个任务。
+
+---
+
+### 3.2 配置加载
+
+配置文件使用 TOML。
+
+示例：
+
+```toml
+[global]
+structured_log_root = "/data/task_structured_logs"
+cache_dir = "/var/lib/task_monitor"
+monitor_log_dir = "/var/log/task_monitor"
+
+[feishu]
+webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
+
+[jobs.daily_sync]
+script = "/opt/jobs/daily_sync.py"
+interpreter = "python3"
+timeout_seconds = 600
+notify_on_success = false
+```
+
+字段约束：
+
+| 字段                             | 必填 | 说明               |
+| ------------------------------ | -: | ---------------- |
+| `global.structured_log_root`   |  是 | 业务结构化日志根目录       |
+| `global.cache_dir`             |  是 | 任务执行编号缓存目录       |
+| `global.monitor_log_dir`       |  是 | 任务监视器自身日志目录      |
+| `feishu.webhook`               |  是 | 飞书自定义机器人 Webhook |
+| `jobs.<job>.script`            |  是 | 业务脚本路径           |
+| `jobs.<job>.interpreter`       |  是 | 解释器路径或命令         |
+| `jobs.<job>.timeout_seconds`   |  是 | 任务超时时间，单位秒       |
+| `jobs.<job>.notify_on_success` |  是 | 成功时是否推送飞书        |
+
+---
+
+### 3.3 执行编号生成
+
+任务监视器启动后，在正式执行业务脚本前生成本次执行编号 `number`。
+
+编号规则：
+
+* 按日期和任务名分别计数。
+* 日期格式为 `YYYYMMDD`。
+* 同一天同一个任务多次执行时，编号从 `1` 开始单调递增。
+* 日期变化后重新从 `1` 开始。
+
+缓存示例：
+
+```json
+{
+  "date": "20260428",
+  "jobs": {
+    "daily_sync": 3,
+    "daily_report": 1
+  }
+}
+```
+
+编号必须在业务脚本启动前持久化，避免监视器异常退出后重复使用相同编号。
+
+---
+
+### 3.4 业务脚本启动
+
+业务脚本启动方式：
+
+```bash
+<interpreter> <script>
+```
+
+示例：
+
+```bash
+python3 /opt/jobs/daily_sync.py
+```
+
+任务监视器不传递业务参数，不捕获 stdout/stderr。
+
+---
+
+### 3.5 结构化日志读取
+
+业务脚本自行生成结构化日志。
+
+日志路径规则：
+
+```text
+${structured_log_root}/${date}/${job}_${number}.log
+```
+
+示例：
+
+```text
+/data/task_structured_logs/20260428/daily_sync_1.log
+```
+
+结构化日志格式为 JSON Lines。
+
+每行格式：
+
+```json
+{"status":"success","message":"finished"}
+```
+
+字段说明：
+
+| 字段        | 类型     | 说明                           |
+| --------- | ------ | ---------------------------- |
+| `status`  | string | 仅允许 `success` 或 `failed`     |
+| `message` | string | 业务脚本自定义信息，任务监视器不解析业务语义，只用于推送 |
+
+如果文件中有多行，任务监视器只读取最后一行。
+
+---
+
+### 3.6 结果判定
+
+判定优先级：
+
+```text
+timeout -> structured log -> process exit code
+```
+
+判定规则：
+
+| 场景                              | 最终状态                     |
+| ------------------------------- | ------------------------ |
+| 任务超时                            | `timeout`                |
+| 结构化日志合法，`status=success`        | `success`                |
+| 结构化日志合法，`status=failed`         | `failed`                 |
+| 结构化日志不存在、为空、JSON 非法或字段非法，退出码为 0 | `success_with_log_error` |
+| 结构化日志不存在、为空、JSON 非法或字段非法，退出码非 0 | `failed`                 |
+| 业务脚本启动失败                        | `failed`                 |
+| 配置错误                            | `monitor_error`          |
+| 缓存错误                            | `monitor_error`          |
+
+---
+
+### 3.7 飞书通知
+
+飞书通知使用全局 Webhook。
+
+推送规则：
+
+| 状态                       | 是否推送                      |
+| ------------------------ | ------------------------- |
+| `success`                | 根据 `notify_on_success` 决定 |
+| `success_with_log_error` | 推送                        |
+| `failed`                 | 必须推送                      |
+| `timeout`                | 必须推送                      |
+| `monitor_error`          | 必须推送                      |
+
+推送内容应包含：
+
+* 任务名
+* 日期
+* 执行编号
+* 最终状态
+* 业务 message
+* 业务脚本退出码
+* 是否超时
+* 结构化日志路径
+* 业务脚本路径
+* 主机名
+* 发生时间
+
+---
+
+## 4. 架构设计
+
+### 4.1 架构总览
+
+整体执行链路：
+
+```text
+crontab
+  -> task_monitor CLI
+      -> 加载配置
+      -> 校验任务
+      -> 初始化日志
+      -> 生成执行编号
+      -> 计算结构化日志路径
+      -> 启动业务脚本
+      -> 等待业务脚本结束或超时
+      -> 读取结构化日志
+      -> 判定任务结果
+      -> 推送飞书
+      -> 退出
+```
+
+---
+
+### 4.2 模块划分
+
+| 模块      | 文件                  | 职责                   |
+| ------- | ------------------- | -------------------- |
+| CLI 模块  | `cli.py`            | 解析命令行参数，调用主流程        |
+| 配置模块    | `config.py`         | 加载和校验 TOML 配置        |
+| 上下文模块   | `context.py`        | 构造本次任务运行上下文          |
+| 缓存模块    | `cache.py`          | 管理每日任务执行编号           |
+| 执行模块    | `runner.py`         | 启动业务脚本并等待结果          |
+| 结构化日志模块 | `structured_log.py` | 读取并解析结构化日志最后一行       |
+| 结果判定模块  | `evaluator.py`      | 根据超时、结构化日志、退出码生成最终结果 |
+| 通知模块    | `notifier.py`       | 构造并发送飞书消息            |
+| 监视器日志模块 | `monitor_logger.py` | 初始化和记录监视器自身日志        |
+| 编排模块    | `orchestrator.py`   | 编排完整执行流程             |
+
+---
+
+### 4.3 模块依赖关系
+
+```text
+cli.py
+  -> config.py
+  -> orchestrator.py
+
+orchestrator.py
+  -> context.py
+  -> cache.py
+  -> runner.py
+  -> structured_log.py
+  -> evaluator.py
+  -> notifier.py
+  -> monitor_logger.py
+
+evaluator.py
+  -> structured_log.py
+  -> runner.py
+
+notifier.py
+  -> config.py
+```
+
+约束：
+
+* `runner.py` 不依赖通知模块。
+* `structured_log.py` 不依赖进程执行模块。
+* `evaluator.py` 负责统一结果判定。
+* `orchestrator.py` 是唯一流程编排中心。
+* 飞书 HTTP 调用逻辑只能位于 `notifier.py`。
+
+---
+
+## 5. 技术栈
+
+| 类别       | 选择                   |
+| -------- | -------------------- |
+| 语言       | Python 3.8 ~ 3.12    |
+| 项目管理     | uv                   |
+| 配置格式     | TOML                 |
+| TOML 解析  | `tomllib` / `tomli`  |
+| HTTP 客户端 | `urllib.request`     |
+| 子进程管理    | `subprocess.Popen`   |
+| 日志       | Python 标准库 `logging` |
+| 缓存格式     | JSON                 |
+| 文件锁      | Linux `fcntl.flock`  |
+| CLI 参数解析 | `argparse`           |
+| 路径处理     | `pathlib`            |
+| 时间处理     | `datetime`           |
+| 测试框架     | `pytest`             |
+
+依赖控制：
+
+```toml
+dependencies = [
+    "tomli; python_version < '3.11'"
+]
+```
+
+除测试依赖外，运行期尽量只使用标准库。
+
+---
+
+## 6. 并发模型
+
+### 6.1 程序模型
+
+第一版采用单进程、单线程、阻塞式模型。
+
+```text
+main thread
+  -> load config
+  -> generate number
+  -> start subprocess
+  -> wait subprocess
+  -> read structured log
+  -> evaluate
+  -> notify
+  -> exit
+```
+
+### 6.2 任务超时模型
+
+使用 `subprocess.Popen` 启动业务脚本。
+
+等待方式：
+
+```text
+process.wait(timeout=timeout_seconds)
+```
+
+如果超时：
+
+* 捕获 `subprocess.TimeoutExpired`
+* 不调用 `kill()`
+* 不调用 `terminate()`
+* 不读取后续结构化日志作为最终结果
+* 直接判定为 `timeout`
+* 推送飞书
+* 任务监视器退出
+
+### 6.3 缓存并发模型
+
+同一时间可能存在多个任务监视器实例，因此缓存写入必须使用文件锁。
+
+要求：
+
+* 使用 `fcntl.flock`。
+* 读取、修改、写回缓存必须在同一锁保护区间内完成。
+* 编号生成和持久化必须是原子语义。
+
+---
+
+## 7. 数据结构设计
+
+### 7.1 GlobalConfig
+
+```text
+GlobalConfig
+  structured_log_root: Path
+  cache_dir: Path
+  monitor_log_dir: Path
+```
+
+### 7.2 FeishuConfig
+
+```text
+FeishuConfig
+  webhook: str
+```
+
+### 7.3 JobConfig
+
+```text
+JobConfig
+  name: str
+  script: Path
+  interpreter: str
+  timeout_seconds: int
+  notify_on_success: bool
+```
+
+### 7.4 RunContext
+
+```text
+RunContext
+  job_name: str
+  date: str
+  number: int
+  structured_log_path: Path
+  config_path: Path
+  job_config: JobConfig
+  global_config: GlobalConfig
+```
+
+### 7.5 ProcessResult
+
+```text
+ProcessResult
+  started: bool
+  pid: Optional[int]
+  exit_code: Optional[int]
+  timed_out: bool
+  error_message: Optional[str]
+```
+
+### 7.6 StructuredLogResult
+
+```text
+StructuredLogResult
+  found: bool
+  valid: bool
+  status: Optional[str]
+  message: Optional[str]
+  error_message: Optional[str]
+  raw_line: Optional[str]
+```
+
+### 7.7 EvaluationResult
+
+```text
+EvaluationResult
+  final_status: str
+  should_notify: bool
+  exit_code: int
+  title: str
+  message: str
+```
+
+允许的 `final_status`：
+
+```text
+success
+success_with_log_error
+failed
+timeout
+monitor_error
+```
+
+---
+
+## 8. API 协议定义
+
+### 8.1 命令行协议
+
+```bash
+task_monitor --config <config_path> --job <job_name>
+```
+
+示例：
+
+```bash
+task_monitor --config /etc/task_monitor/config.toml --job daily_sync
+```
+
+### 8.2 结构化日志协议
+
+路径：
+
+```text
+${structured_log_root}/${date}/${job}_${number}.log
+```
+
+内容：
+
+```json
+{"status":"success","message":"finished"}
+```
+
+状态值：
+
+```text
+success
+failed
+```
+
+约束：
+
+* 文件格式为 JSON Lines。
+* 每行必须是一个 JSON object。
+* 任务监视器只读取最后一行。
+* `message` 缺失时可使用空字符串。
+* `status` 缺失或非法时视为结构化日志异常。
+
+### 8.3 飞书 Webhook 协议
+
+使用飞书自定义机器人 Webhook。
+
+HTTP 方法：
+
+```text
+POST
+```
+
+Content-Type：
+
+```text
+application/json
+```
+
+消息类型可使用 `text`。
+
+请求体示例：
+
+```json
+{
+  "msg_type": "text",
+  "content": {
+    "text": "任务: daily_sync\n状态: failed\n日期: 20260428\n编号: 1\n消息: xxx"
+  }
+}
+```
+
+---
+
+## 9. 错误处理策略
+
+### 9.1 错误分类
+
+| 错误类型    | 处理方式              |
+| ------- | ----------------- |
+| 配置文件不存在 | 记录日志，推送飞书，退出      |
+| 配置字段缺失  | 记录日志，推送飞书，退出      |
+| 任务名不存在  | 记录日志，推送飞书，退出      |
+| 缓存目录不可写 | 记录日志，推送飞书，退出      |
+| 缓存文件损坏  | 记录日志，推送飞书，退出      |
+| 脚本不存在   | 记录日志，推送飞书，退出      |
+| 解释器不存在  | 记录日志，推送飞书，退出      |
+| 子进程启动失败 | 记录日志，推送飞书，退出      |
+| 任务超时    | 推送飞书，监视器退出，不杀业务进程 |
+| 结构化日志异常 | 使用退出码兜底           |
+| 飞书推送失败  | 记录日志，返回非零退出码      |
+
+### 9.2 退出码
+
+|  退出码 | 含义               |
+| ---: | ---------------- |
+|  `0` | 任务成功，且必要通知成功     |
+|  `1` | 任务失败             |
+|  `2` | 任务超时             |
+|  `3` | 配置错误             |
+|  `4` | 缓存错误             |
+|  `5` | 脚本启动错误           |
+|  `6` | 结构化日志异常但业务退出码为 0 |
+|  `7` | 飞书通知失败           |
+| `10` | 未预期的监视器内部错误      |
+
+---
+
+## 10. 日志策略
+
+### 10.1 监视器自身日志
+
+日志目录：
+
+```text
+${monitor_log_dir}
+```
+
+日志文件：
+
+```text
+${monitor_log_dir}/${date}.log
+```
+
+记录内容：
+
+* 启动时间
+* 配置文件路径
+* 任务名
+* 执行编号
+* 业务脚本路径
+* 解释器
+* 超时时间
+* 业务进程 PID
+* 业务进程退出码
+* 是否超时
+* 结构化日志路径
+* 结构化日志解析结果
+* 最终判定结果
+* 飞书推送结果
+* 程序退出码
+
+### 10.2 日志级别
+
+| 级别         | 使用场景                |
+| ---------- | ------------------- |
+| `INFO`     | 正常启动、编号生成、任务完成、推送成功 |
+| `WARNING`  | 结构化日志异常但退出码为 0      |
+| `ERROR`    | 任务失败、启动失败、通知失败      |
+| `CRITICAL` | 缓存严重损坏、未预期内部错误      |
+
+---
+
+## 11. 构建方式
+
+### 11.1 pyproject.toml
+
+```toml
+[project]
+name = "task_monitor"
+version = "0.1.0"
+description = "A lightweight Linux cron task monitor with structured log evaluation and Feishu notification."
+requires-python = ">=3.8,<3.13"
+dependencies = [
+    "tomli; python_version < '3.11'"
+]
+
+[project.scripts]
+task_monitor = "task_monitor.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest"
+]
+```
+
+### 11.2 本地开发
+
+```bash
+uv sync
+uv run task_monitor --config config.example.toml --job daily_sync
+```
+
+### 11.3 部署运行
+
+```bash
+/path/to/task_monitor/.venv/bin/task_monitor \
+  --config /etc/task_monitor/config.toml \
+  --job daily_sync
+```
+
+### 11.4 crontab 示例
+
+```cron
+30 2 * * * /opt/task_monitor/.venv/bin/task_monitor --config /etc/task_monitor/config.toml --job daily_sync
+```
+
+---
+
+## 12. 目录结构建议
+
+```text
+task_monitor/
+├── pyproject.toml
+├── README.md
+├── config.example.toml
+├── src/
+│   └── task_monitor/
+│       ├── __init__.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── context.py
+│       ├── cache.py
+│       ├── runner.py
+│       ├── structured_log.py
+│       ├── evaluator.py
+│       ├── notifier.py
+│       ├── monitor_logger.py
+│       └── orchestrator.py
+├── tests/
+│   ├── test_config.py
+│   ├── test_cache.py
+│   ├── test_structured_log.py
+│   ├── test_evaluator.py
+│   ├── test_runner.py
+│   └── test_orchestrator.py
+└── docs/
+    └── coding_agent/
+        ├── research/
+        ├── plan/
+        └── todo/
+```
+
+---
+
+## 13. 后续扩展方向
+
+后续可扩展但第一版不实现：
+
+1. 支持任务级飞书 Webhook 覆盖。
+2. 支持飞书机器人签名密钥。
+3. 支持业务脚本参数配置。
+4. 支持捕获 stdout/stderr。
+5. 支持任务失败重试。
+6. 支持同一任务运行锁。
+7. 支持 `--dry-run` 配置检查。
+8. 支持推送模板配置。
+9. 支持多通知渠道。
+10. 支持 SQLite 缓存。
+11. 支持任务运行历史查询。
+12. 支持结构化日志扩展字段，如 `metrics`、`duration_ms`、`detail`。
+
+---
+
+## 14. 对 Coding Agent 的指导
+
+### 14.1 理解工程文档
+
+Coding Agent 必须彻底、全面地阅读本工程文档。
+
+要求：
+
+* 理解项目背景。
+* 理解目标与非目标。
+* 理解任务监视器的完整执行流程。
+* 理解结构化日志协议。
+* 理解配置文件协议。
+* 理解错误处理策略。
+* 理解超时后不杀业务进程这一关键约束。
+* 理解所有模块职责和模块边界。
+* 理解第一版明确不做的内容。
+* 不得遗漏任何功能、架构、技术决策和约束。
+
+### 14.2 理解现有代码
+
+Coding Agent 必须检查项目目录。
+
+如果项目中已有代码，必须：
+
+* 阅读所有已有代码。
+* 理解其工作原理。
+* 理解已有模块职责。
+* 理解已有配置、入口、测试和文档。
+* 识别已有代码与本工程文档之间的一致点和偏差。
+
+学习成果和发现必须详细记录到：
+
+```text
+docs/coding_agent/research/YYYYMMDD_数字编号.md
+```
+
+示例：
+
+```text
+docs/coding_agent/research/20260428_1.md
+```
+
+### 14.3 沟通与计划
+
+Coding Agent 在理解工程文档和现有代码过程中，如发现问题，可以与用户沟通。
+
+沟通完成后，必须形成以下文档：
+
+```text
+docs/coding_agent/plan/YYYYMMDD_数字编号.md
+docs/coding_agent/todo/YYYYMMDD_数字编号.md
+```
+
+其中：
+
+* `plan` 文档描述开发方案、模块实现顺序、关键技术点。
+* `todo` 文档描述可执行任务拆分。
+* `research`、`plan`、`todo` 三份文档必须属于同一迭代周期。
+* 同一迭代周期的文件名编号必须一致。
+
+示例：
+
+```text
+docs/coding_agent/research/20260428_1.md
+docs/coding_agent/plan/20260428_1.md
+docs/coding_agent/todo/20260428_1.md
+```
+
+### 14.4 文档存储与命名规范
+
+所有 Coding Agent 工作文档必须存放在：
+
+```text
+docs/coding_agent/
+```
+
+子目录固定为：
+
+```text
+docs/coding_agent/research/
+docs/coding_agent/plan/
+docs/coding_agent/todo/
+```
+
+文件命名格式：
+
+```text
+YYYYMMDD_数字编号.md
+```
+
+规则：
+
+* `YYYYMMDD` 表示生成日期。
+* `数字编号` 表示当日第几轮迭代。
+* 同一迭代周期内，`research`、`plan`、`todo` 文件编号必须一致。
+* 禁止覆盖历史文档。
+* 每次新一轮修改必须生成新编号文件。
+
+### 14.5 文档迭代与版本管理
+
+用户可能直接在以下文档中使用注释形式给出反馈：
+
+```text
+// TODO 注释内容
+// FIX 注释内容
+// BUG 注释内容
+```
+
+Coding Agent 必须：
+
+* 搜索并读取这些注释。
+* 根据注释优化对应文档。
+* 每次优化后保存为新文件。
+* 保留旧版本文档。
+* 严格遵守命名规范。
+
+### 14.6 禁止提前编码
+
+在用户全面审查并书面批准最终 `plan.md` 之前，Coding Agent 禁止编写任何代码。
+
+在批准前，工作范围仅限于：
+
+* 阅读工程文档。
+* 阅读现有代码。
+* 调研。
+* 提问。
+* 形成 research 文档。
+* 形成 plan 文档。
+* 形成 todo 文档。
+* 根据用户反馈迭代文档。
+
+禁止事项：
+
+* 禁止创建源码文件。
+* 禁止修改源码文件。
+* 禁止实现模块。
+* 禁止添加测试代码。
+* 禁止提交任何功能性代码变更。
+
+只有在用户明确批准最终 `plan.md` 后，Coding Agent 才能进入编码阶段。
