@@ -2,7 +2,7 @@ from task_monitor.structured_log import read_structured_log
 
 
 def test_missing_file_is_invalid(tmp_path):
-    result = read_structured_log(tmp_path / "daily.log", 1)
+    result = read_structured_log(tmp_path / "daily.jsonl", 1)
 
     assert result.valid is False
     assert result.found is False
@@ -10,7 +10,7 @@ def test_missing_file_is_invalid(tmp_path):
 
 
 def test_reads_last_line_when_line_count_is_sufficient(tmp_path):
-    path = tmp_path / "daily.log"
+    path = tmp_path / "daily.jsonl"
     path.write_text(
         '{"status":"failed","message":"first"}\n{"status":"success","message":"last"}\n',
         encoding="utf-8",
@@ -26,7 +26,7 @@ def test_reads_last_line_when_line_count_is_sufficient(tmp_path):
 
 
 def test_number_greater_than_line_count_is_invalid(tmp_path):
-    path = tmp_path / "daily.log"
+    path = tmp_path / "daily.jsonl"
     path.write_text('{"status":"success","message":"first"}\n', encoding="utf-8")
 
     result = read_structured_log(path, 2)
@@ -37,7 +37,7 @@ def test_number_greater_than_line_count_is_invalid(tmp_path):
 
 
 def test_message_non_string_is_converted(tmp_path):
-    path = tmp_path / "daily.log"
+    path = tmp_path / "daily.jsonl"
     path.write_text('{"status":"success","message":123}\n', encoding="utf-8")
 
     result = read_structured_log(path, 1)
@@ -47,7 +47,7 @@ def test_message_non_string_is_converted(tmp_path):
 
 
 def test_invalid_status_is_invalid(tmp_path):
-    path = tmp_path / "daily.log"
+    path = tmp_path / "daily.jsonl"
     path.write_text('{"status":"unknown","message":"x"}\n', encoding="utf-8")
 
     result = read_structured_log(path, 1)

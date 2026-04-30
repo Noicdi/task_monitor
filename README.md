@@ -15,7 +15,7 @@ task_monitor --config /etc/task_monitor/config.toml --job daily_sync
 Business scripts append one JSON object per run to:
 
 ```text
-${structured_log_root}/${date}/${job}.log
+${structured_log_root}/${date}/${job}.jsonl
 ```
 
 Example:

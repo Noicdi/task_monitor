@@ -161,13 +161,13 @@ python3 /opt/jobs/daily_sync.py
 日志路径规则：
 
 ```text
-${structured_log_root}/${date}/${job}_${number}.log
+${structured_log_root}/${date}/${job}.jsonl
 ```
 
 示例：
 
 ```text
-/data/task_structured_logs/20260428/daily_sync_1.log
+/data/task_structured_logs/20260428/daily_sync.jsonl
 ```
 
 结构化日志格式为 JSON Lines。
@@ -504,7 +504,7 @@ task_monitor --config /etc/task_monitor/config.toml --job daily_sync
 路径：
 
 ```text
-${structured_log_root}/${date}/${job}_${number}.log
+${structured_log_root}/${date}/${job}.jsonl
 ```
 
 内容：

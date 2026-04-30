@@ -42,7 +42,7 @@ def test_orchestrator_success_without_notification(tmp_path, monkeypatch):
     script = tmp_path / "job.py"
     script.write_text(
         "from pathlib import Path\n"
-        "p = Path({!r}) / {!r} / 'daily.log'\n"
+        "p = Path({!r}) / {!r} / 'daily.jsonl'\n"
         "p.parent.mkdir(parents=True, exist_ok=True)\n"
         "with p.open('a', encoding='utf-8') as f:\n"
         "    f.write('{{\"status\":\"success\",\"message\":\"ok\"}}\\n')\n".format(str(structured_root), date),
@@ -82,7 +82,7 @@ def test_orchestrator_notification_failure_returns_7(tmp_path, monkeypatch):
     script = tmp_path / "job.py"
     script.write_text(
         "from pathlib import Path\n"
-        "p = Path({!r}) / {!r} / 'daily.log'\n"
+        "p = Path({!r}) / {!r} / 'daily.jsonl'\n"
         "p.parent.mkdir(parents=True, exist_ok=True)\n"
         "with p.open('a', encoding='utf-8') as f:\n"
         "    f.write('{{\"status\":\"success\",\"message\":\"ok\"}}\\n')\n".format(str(structured_root), date),

@@ -20,6 +20,6 @@ def test_structured_log_path_uses_job_file_without_number():
 
     context = build_context(Path("/etc/config.toml"), global_config, job_config, "20260428", 3)
 
-    assert context.structured_log_path == Path("/data/logs/20260428/daily_sync.log")
+    assert context.structured_log_path == Path("/data/logs/20260428/daily_sync.jsonl")
     assert context.number == 3
 
